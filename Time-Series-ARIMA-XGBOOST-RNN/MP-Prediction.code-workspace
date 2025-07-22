@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"name": "MP-Prediction",
+			"path": ".."
+		},
+		{
+			"name": "CYGNSS-data",
+			"path": "../../Downloads/CYGNSS-data"
+		}
+	],
+	"settings": {}
+}

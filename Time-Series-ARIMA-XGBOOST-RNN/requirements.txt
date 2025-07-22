@@ -1,0 +1,20 @@
+# Core data science packages
+pandas>=1.3.0
+numpy>=1.21.0
+matplotlib>=3.3.0
+seaborn>=0.11.0
+
+# Machine learning packages
+scikit-learn>=1.0.0
+xgboost>=1.5.0
+scipy>=1.7.0
+statsmodels>=0.12.0
+
+# Deep learning packages
+# Note: TensorFlow 1.4 is very old and may not work with modern Python
+# Using TensorFlow 2.x instead with compatibility mode
+tensorflow>=2.8.0,<2.16.0
+
+# Additional dependencies that might be needed
+pytz>=2021.1
+python-dateutil>=2.8.0 
