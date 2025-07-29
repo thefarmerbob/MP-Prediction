@@ -30,11 +30,14 @@ print(f"Using device: {device}")
 # Get files for training
 nc_files = sorted(Path("/Users/maradumitru/Downloads/CYGNSS-data").glob("cyg.ddmi*.nc"))
 print(f"Processing {len(nc_files)} files with proper temporal splitting")
+print(f"Loading from: /Users/maradumitru/Downloads/CYGNSS-data")
+print(f"First file: {nc_files[0].name if nc_files else 'No files found'}")
+print(f"Last file: {nc_files[-1].name if nc_files else 'No files found'}")
 
 class Args:
     """Configuration class for SA-ConvLSTM model"""
     def __init__(self):
-        self.batch_size = 2  # Reduced further for debugging
+        self.batch_size = 16  # Reduced further for debugging
         self.gpu_num = 1
         self.img_size = 64  # Reduced from 128 for faster debugging
         self.num_layers = 1  # Reduced from 2 for debugging
@@ -134,28 +137,107 @@ def process_and_plot_to_array(nc_file):
     
     return normalized_data
 
+def process_and_plot_to_array_raw(nc_file):
+    """Convert a netCDF file to a Japan region cropped array WITHOUT normalization."""
+    ds = xr.open_dataset(nc_file)
+    data = ds['mp_concentration']
+    data_array = data.values
+    data_array_2d = data_array.squeeze()
+    
+    # Try to get the actual lat/lon coordinates from the dataset
+    lats = None
+    lons = None
+    
+    # Check for different possible coordinate variable names
+    possible_lat_names = ['lat', 'latitude', 'y', 'lat_1', 'lat_2']
+    possible_lon_names = ['lon', 'longitude', 'x', 'lon_1', 'lon_2']
+    
+    for lat_name in possible_lat_names:
+        if lat_name in ds.variables:
+            lats = ds[lat_name].values
+            break
+    
+    for lon_name in possible_lon_names:
+        if lon_name in ds.variables:
+            lons = ds[lon_name].values
+            break
+    
+    # Apply Japan region cropping if coordinates are available
+    if lats is not None and lons is not None:
+        # Japan region coordinates (broader)
+        japan_sw_lat, japan_sw_lon = 25.35753, 118.85766
+        japan_ne_lat, japan_ne_lon = 36.98134, 145.47117
+        
+        # Convert to grid indices
+        japan_sw_lat_idx, japan_sw_lon_idx = lat_lon_to_indices(japan_sw_lat, japan_sw_lon, lats, lons)
+        japan_ne_lat_idx, japan_ne_lon_idx = lat_lon_to_indices(japan_ne_lat, japan_ne_lon, lats, lons)
+        
+        # Ensure proper ordering
+        japan_lat_start = min(japan_sw_lat_idx, japan_ne_lat_idx)
+        japan_lat_end = max(japan_sw_lat_idx, japan_ne_lat_idx)
+        japan_lon_start = min(japan_sw_lon_idx, japan_ne_lon_idx)
+        japan_lon_end = max(japan_sw_lon_idx, japan_ne_lon_idx)
+        
+        # Crop the data to Japan region
+        data_array_2d = data_array_2d[japan_lat_start:japan_lat_end, japan_lon_start:japan_lon_end]
+        
+        # Only print once at the beginning
+        if nc_file == nc_files[0]:
+            print(f"Japan region cropped to: lat[{japan_lat_start}:{japan_lat_end}], lon[{japan_lon_start}:{japan_lon_end}]")
+            print(f"Japan region shape: {data_array_2d.shape}")
+    else:
+        print("Warning: No coordinate information found, using full dataset")
+    
+    # Return raw data WITHOUT normalization
+    return data_array_2d
+
 def extract_data_and_clusters(nc_files):
-    """Extract and preprocess Japan region data for training."""
+    """Extract and preprocess Japan region data for training with GLOBAL normalization."""
     data = []
     
-    # Limit processing to first 50 files for debugging
-    max_files = 50
-    nc_files_limited = nc_files[:max_files]
+    # Process ALL available files
+    nc_files_limited = nc_files
     
-    print(f"Processing {len(nc_files_limited)} files (limited from {len(nc_files)} total files)")
-    print("Processing files and creating normalized Japan region images...")
+    print(f"Processing ALL {len(nc_files_limited)} files")
+    print("Phase 1: Collecting raw data to compute global statistics...")
     
+    # First pass: collect all raw data to compute global min/max
+    raw_data = []
     for i, nc_file in enumerate(nc_files_limited):
         if i % 10 == 0:
-            print(f"Processing file {i+1}/{len(nc_files_limited)} - Japan region cropping")
+            print(f"  Collecting file {i+1}/{len(nc_files_limited)} - raw data")
         
-        normalized_image = process_and_plot_to_array(nc_file)
-        downsampled_image = downsample_data(normalized_image)
-        data.append(downsampled_image)
+        raw_image = process_and_plot_to_array_raw(nc_file)  # Raw data without normalization
+        downsampled_image = downsample_data(raw_image)
+        raw_data.append(downsampled_image)
+    
+    raw_data = np.array(raw_data)
+    
+    # Compute global min/max across ALL images
+    global_min = np.nanmin(raw_data)
+    global_max = np.nanmax(raw_data)
+    print(f"\nGlobal data statistics:")
+    print(f"  Min: {global_min:.8f}")
+    print(f"  Max: {global_max:.8f}")
+    print(f"  Range: {global_max - global_min:.8f}")
+    
+    # Second pass: normalize using global min/max
+    print("\nPhase 2: Applying global normalization...")
+    for i, raw_image in enumerate(raw_data):
+        if global_max > global_min:
+            normalized_image = (raw_image - global_min) / (global_max - global_min)
+        else:
+            normalized_image = np.zeros_like(raw_image)
+        
+        # Replace NaN values with 0
+        normalized_image = np.nan_to_num(normalized_image, nan=0.0)
+        data.append(normalized_image)
     
     data = np.array(data)
-    print(f"Final Japan region data shape: {data.shape}")
+    print(f"\nFinal Japan region data shape: {data.shape}")
     print(f"Geographic region: Japan (25.35753°N-36.98134°N, 118.85766°E-145.47117°E)")
+    print(f"Applied GLOBAL normalization: [{global_min:.8f}, {global_max:.8f}] -> [0.0, 1.0]")
+    print(f"This preserves absolute concentration relationships between images!")
     
     return data
 
@@ -216,47 +298,11 @@ def create_sequences_from_data(data, seq_length):
     
     return sequences, target_images
 
-def improved_contrast_loss(pred, target, low_threshold=0.2, high_threshold=0.6, 
-                          low_weight=2.0, high_weight=2.0, contrast_weight=1.0):
+def simple_mae_loss(pred, target):
     """
-    Improved loss function that balances high/low concentrations and encourages contrast.
+    Simple Mean Absolute Error loss function for normal prediction.
     """
-    # Basic MAE
-    mae = torch.mean(torch.abs(pred - target))
-    
-    # Create masks for different concentration levels
-    low_concentration_mask = (target < low_threshold).float()
-    high_concentration_mask = (target > high_threshold).float()
-    mid_concentration_mask = 1.0 - low_concentration_mask - high_concentration_mask
-    
-    # Weighted loss that pays attention to ALL concentration levels
-    weighted_mae = torch.mean(
-        torch.abs(pred - target) * (
-            1.0 +  # Base weight
-            low_weight * low_concentration_mask +      # Extra attention to low concentrations
-            high_weight * high_concentration_mask +    # Extra attention to high concentrations
-            0.5 * mid_concentration_mask               # Some attention to mid concentrations
-        )
-    )
-    
-    # Contrast preservation loss - encourages maintaining the range of values
-    pred_std = torch.std(pred)
-    target_std = torch.std(target)
-    contrast_loss = torch.abs(pred_std - target_std)
-    
-    # Edge preservation loss - maintains sharp transitions
-    pred_grad_x = torch.abs(pred[:, :, :-1, :] - pred[:, :, 1:, :])
-    target_grad_x = torch.abs(target[:, :, :-1, :] - target[:, :, 1:, :])
-    pred_grad_y = torch.abs(pred[:, :, :, :-1] - pred[:, :, :, 1:])
-    target_grad_y = torch.abs(target[:, :, :, :-1] - target[:, :, :, 1:])
-    
-    edge_loss = torch.mean(torch.abs(pred_grad_x - target_grad_x)) + \
-                torch.mean(torch.abs(pred_grad_y - target_grad_y))
-    
-    # Combine all losses
-    total_loss = weighted_mae + contrast_weight * contrast_loss + 0.1 * edge_loss
-    
-    return total_loss
+    return torch.mean(torch.abs(pred - target))
 
 def train_sa_convlstm(model, train_loader, val_loader, args):
     """Train the SA-ConvLSTM model."""
@@ -292,7 +338,7 @@ def train_sa_convlstm(model, train_loader, val_loader, args):
             # Take the last prediction from the sequence
             outputs = outputs[:, -1, :, :, :]  # (batch, 1, height, width)
             
-            loss = improved_contrast_loss(outputs, batch_y)
+            loss = simple_mae_loss(outputs, batch_y)
             
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -324,7 +370,7 @@ def train_sa_convlstm(model, train_loader, val_loader, args):
                 outputs = model(batch_x)
                 outputs = outputs[:, -1, :, :, :]  # Take last prediction
                 
-                loss = improved_contrast_loss(outputs, batch_y)
+                loss = simple_mae_loss(outputs, batch_y)
                 val_loss += loss.item()
                 val_batches += 1
         
@@ -506,6 +552,8 @@ if __name__ == "__main__":
     # Extract timestamps and ensure temporal ordering
     timestamps = extract_timestamps_from_filenames(nc_files)
     print(f"Data spans from {timestamps[0]} to {timestamps[-1]}")
+    print(f"Sample timestamps: {[ts.strftime('%Y-%m-%d') for ts in timestamps[:5]]}")
+    print(f"Total unique days: {len(set(ts.date() for ts in timestamps))}")
     
     # Extract data
     print("\nExtracting data...")
@@ -580,7 +628,7 @@ if __name__ == "__main__":
             "memory_module": True,
             "data_files": len(nc_files),
             "geographic_region": "Japan",
-            "loss_function": "improved_contrast_loss"
+            "loss_function": "simple_mae_loss"
         }
     )
     
