@@ -41,6 +41,10 @@ def process_and_plot(nc_file):
     print(f"File: {nc_file}, Average microplastic concentration: {average_concentration:.2f}")
 
     # Define the regions of interest with coordinates
+    # Japan region (broader)
+    # SW: 25.35753, 118.85766
+    # NE: 36.98134, 145.47117
+    
     # Tsushima region
     # SW: 34.02837, 129.11613
     # NE: 34.76456, 129.55801
@@ -80,6 +84,19 @@ def process_and_plot(nc_file):
     if lats is not None and lons is not None:
         print(f"Latitude range: {lats.min():.4f} to {lats.max():.4f}")
         print(f"Longitude range: {lons.min():.4f} to {lons.max():.4f}")
+        
+        # Convert lat/lon to grid indices for Japan region
+        japan_sw_lat, japan_sw_lon = 25.35753, 118.85766
+        japan_ne_lat, japan_ne_lon = 36.98134, 145.47117
+        
+        japan_sw_lat_idx, japan_sw_lon_idx = lat_lon_to_indices(japan_sw_lat, japan_sw_lon, lats, lons)
+        japan_ne_lat_idx, japan_ne_lon_idx = lat_lon_to_indices(japan_ne_lat, japan_ne_lon, lats, lons)
+        
+        # Ensure proper ordering for Japan
+        japan_lat_start = min(japan_sw_lat_idx, japan_ne_lat_idx)
+        japan_lat_end = max(japan_sw_lat_idx, japan_ne_lat_idx)
+        japan_lon_start = min(japan_sw_lon_idx, japan_ne_lon_idx)
+        japan_lon_end = max(japan_sw_lon_idx, japan_ne_lon_idx)
         
         # Convert lat/lon to grid indices for Tsushima region
         tsushima_sw_lat, tsushima_sw_lon = 34.02837, 129.11613
@@ -127,6 +144,7 @@ def process_and_plot(nc_file):
         osaka_lon_start = min(osaka_sw_lon_idx, osaka_ne_lon_idx)
         osaka_lon_end = max(osaka_sw_lon_idx, osaka_ne_lon_idx)
         
+        print(f"Japan grid indices: lat[{japan_lat_start}:{japan_lat_end}], lon[{japan_lon_start}:{japan_lon_end}]")
         print(f"Tsushima grid indices: lat[{tsushima_lat_start}:{tsushima_lat_end}], lon[{tsushima_lon_start}:{tsushima_lon_end}]")
         print(f"Tokyo grid indices: lat[{tokyo_lat_start}:{tokyo_lat_end}], lon[{tokyo_lon_start}:{tokyo_lon_end}]")
         print(f"Kyoto grid indices: lat[{kyoto_lat_start}:{kyoto_lat_end}], lon[{kyoto_lon_start}:{kyoto_lon_end}]")
@@ -144,16 +162,19 @@ def process_and_plot(nc_file):
         print("Using approximate grid indices (no lat/lon coordinates found)")
 
     # Extract the regions of interest from the data
+    japan_region_data = data_array_2d[japan_lat_start:japan_lat_end, japan_lon_start:japan_lon_end]
     tsushima_region_data = data_array_2d[tsushima_lat_start:tsushima_lat_end, tsushima_lon_start:tsushima_lon_end]
     tokyo_region_data = data_array_2d[tokyo_lat_start:tokyo_lat_end, tokyo_lon_start:tokyo_lon_end]
     kyoto_region_data = data_array_2d[kyoto_lat_start:kyoto_lat_end, kyoto_lon_start:kyoto_lon_end]
     osaka_region_data = data_array_2d[osaka_lat_start:osaka_lat_end, osaka_lon_start:osaka_lon_end]
 
     # Calculate the average concentration in all regions, ignoring NaNs
+    average_concentration_japan = np.nanmean(japan_region_data)
     average_concentration_tsushima = np.nanmean(tsushima_region_data)
     average_concentration_tokyo = np.nanmean(tokyo_region_data)
     average_concentration_kyoto = np.nanmean(kyoto_region_data)
     average_concentration_osaka = np.nanmean(osaka_region_data)
+    print(f"File: {nc_file}, Average microplastic concentration in Japan: {average_concentration_japan:.2f}")
     print(f"File: {nc_file}, Average microplastic concentration in Tsushima: {average_concentration_tsushima:.2f}")
     print(f"File: {nc_file}, Average microplastic concentration in Tokyo: {average_concentration_tokyo:.2f}")
     print(f"File: {nc_file}, Average microplastic concentration in Kyoto: {average_concentration_kyoto:.2f}")

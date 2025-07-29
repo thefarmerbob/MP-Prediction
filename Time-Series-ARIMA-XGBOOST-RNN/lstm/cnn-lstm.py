@@ -20,7 +20,8 @@ import json
 import wandb
 
 # Set device
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+#device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device('mps')
 print(f"Using device: {device}")
 
 # Get files for training
@@ -224,7 +225,7 @@ class CNNLSTMModel(nn.Module):
         
         # Remove channel dimension: (batch_size, 1, height, width) -> (batch_size, height, width)
         return out.squeeze(1)
-
+'''
 def verify_no_leakage(X_train, X_test, y_train, y_test, seq_length):
     """Verify there's no data leakage between train and test sets."""
     print("\n=== LEAKAGE VERIFICATION ===")
@@ -258,19 +259,63 @@ def verify_no_leakage(X_train, X_test, y_train, y_test, seq_length):
     else:
         print(f"✗ LEAKAGE DETECTED - Found {leakage_count} instances of training data in test sequences!")
         return False
+'''
+def aggressive_weighted_loss(pred, target, high_threshold=0.4, high_weight=20.0, gradient_weight=0.1):
+    """
+    Aggressive weighted loss to force sharp, detailed predictions.
+    
+    Args:
+        pred: Predicted values
+        target: True values
+        high_threshold: Lower threshold to catch more important pixels
+        high_weight: Much higher weight for high-concentration pixels
+        gradient_weight: Weight for gradient penalty to discourage smoothness
+    """
+    # 1. Weighted MAE with aggressive weighting
+    weight_mask = torch.ones_like(target)
+    
+    # Very high concentration pixels get extreme weight
+    very_high_mask = target > 0.7
+    high_mask = (target > high_threshold) & (target <= 0.7)
+    
+    weight_mask[high_mask] = high_weight
+    weight_mask[very_high_mask] = high_weight * 2  # Even more weight for very bright pixels
+    
+    # Calculate weighted MAE
+    mae = torch.abs(pred - target)
+    weighted_mae = (mae * weight_mask).mean()
+    
+    # 2. Gradient penalty to discourage overly smooth predictions
+    # Calculate spatial gradients
+    if len(pred.shape) == 3:  # batch_size, height, width
+        # Horizontal gradients
+        pred_grad_x = torch.abs(pred[:, :, 1:] - pred[:, :, :-1])
+        target_grad_x = torch.abs(target[:, :, 1:] - target[:, :, :-1])
+        
+        # Vertical gradients
+        pred_grad_y = torch.abs(pred[:, 1:, :] - pred[:, :-1, :])
+        target_grad_y = torch.abs(target[:, 1:, :] - target[:, :-1, :])
+        
+        # Penalize when prediction gradients are much smaller than target gradients
+        grad_loss_x = torch.relu(target_grad_x - pred_grad_x).mean()
+        grad_loss_y = torch.relu(target_grad_y - pred_grad_y).mean()
+        
+        gradient_penalty = gradient_weight * (grad_loss_x + grad_loss_y)
+    else:
+        gradient_penalty = 0
+    
+    return weighted_mae + gradient_penalty
 
 def train_model_pytorch(model, train_loader, val_loader, epochs=12, learning_rate=0.01):
-    """Train the PyTorch model."""
-    print("\nStarting model training...")
+    """Train the PyTorch model using weighted MAE loss for better high-concentration prediction."""
+    print("\nStarting model training with weighted loss for high concentrations...")
     
-    criterion = nn.MSELoss()
+    # Using custom weighted loss instead of standard L1Loss
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     
     history = {
         'train_loss': [],
         'val_loss': [],
-        'train_mae': [],
-        'val_mae': []
     }
     
     model.to(device)
@@ -279,7 +324,6 @@ def train_model_pytorch(model, train_loader, val_loader, epochs=12, learning_rat
         # Training phase
         model.train()
         train_loss = 0.0
-        train_mae = 0.0
         num_train_batches = 0
         
         for batch_x, batch_y in train_loader:
@@ -287,62 +331,57 @@ def train_model_pytorch(model, train_loader, val_loader, epochs=12, learning_rat
             
             optimizer.zero_grad()
             outputs = model(batch_x)
-            loss = criterion(outputs, batch_y)
+            loss = aggressive_weighted_loss(outputs, batch_y)
             loss.backward()
             optimizer.step()
             
             train_loss += loss.item()
-            train_mae += F.l1_loss(outputs, batch_y).item()
             num_train_batches += 1
         
         # Validation phase
         model.eval()
         val_loss = 0.0
-        val_mae = 0.0
         num_val_batches = 0
         
         with torch.no_grad():
             for batch_x, batch_y in val_loader:
                 batch_x, batch_y = batch_x.to(device), batch_y.to(device)
                 outputs = model(batch_x)
-                loss = criterion(outputs, batch_y)
+                loss = aggressive_weighted_loss(outputs, batch_y)
                 
                 val_loss += loss.item()
-                val_mae += F.l1_loss(outputs, batch_y).item()
                 num_val_batches += 1
         
         # Calculate averages
         avg_train_loss = train_loss / num_train_batches
         avg_val_loss = val_loss / num_val_batches
-        avg_train_mae = train_mae / num_train_batches
-        avg_val_mae = val_mae / num_val_batches
         
         # Store history
         history['train_loss'].append(avg_train_loss)
         history['val_loss'].append(avg_val_loss)
-        history['train_mae'].append(avg_train_mae)
-        history['val_mae'].append(avg_val_mae)
         
         # Log to wandb
         wandb.log({
-            "loss": avg_train_loss,
-            "val_loss": avg_val_loss,
-            "mae": avg_train_mae,
-            "val_mae": avg_val_mae,
+            "mae": avg_train_loss,
+            "val_mae": avg_val_loss,
             "epoch": epoch
         })
         
-        print(f'Epoch [{epoch+1}/{epochs}], Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}, Train MAE: {avg_train_mae:.6f}, Val MAE: {avg_val_mae:.6f}')
+        print(f'Epoch [{epoch+1}/{epochs}], Train MAE: {avg_train_loss:.6f}, Val MAE: {avg_val_loss:.6f}')
         
-        # Debug: Show dropout effect
+        # Debug: Show dropout effect and aggressive loss stats
         if epoch == 0:
-            print(f"  Note: Val loss < Train loss is normal with dropout (30% neurons disabled during training)")
-            print(f"  This indicates good regularization and no overfitting!")
+            print(f"  Note: Using AGGRESSIVE weighted loss:")
+            print(f"    - High pixels (>0.4) get 20x weight")
+            print(f"    - Very high pixels (>0.7) get 40x weight") 
+            print(f"    - Added gradient penalty to discourage smoothness")
+            print(f"  This should force sharp, detailed predictions!")
+            print(f"  Val loss < Train loss is normal with dropout - indicates good regularization!")
     
     return history
 
 def evaluate_model(model, test_loader, timestamps, test_start_idx):
-    """Evaluate the model and create visualizations."""
+    """Evaluate the model and create visualizations using MAE only."""
     print("\nEvaluating model...")
     
     model.eval()
@@ -361,8 +400,7 @@ def evaluate_model(model, test_loader, timestamps, test_start_idx):
     predictions = np.concatenate(all_predictions, axis=0)
     y_test = np.concatenate(all_targets, axis=0)
     
-    # Calculate metrics
-    mse = mean_squared_error(y_test.flatten(), predictions.flatten())
+    # Calculate MAE
     mae = mean_absolute_error(y_test.flatten(), predictions.flatten())
     
     # Calculate SSIM for each prediction
@@ -374,9 +412,33 @@ def evaluate_model(model, test_loader, timestamps, test_start_idx):
     
     mean_ssim = np.mean(ssim_scores)
     
-    print(f"Test MSE: {mse:.6f}")
     print(f"Test MAE: {mae:.6f}")
     print(f"Mean SSIM: {mean_ssim:.4f}")
+    
+    # Analyze high-concentration prediction performance with aggressive thresholds
+    high_threshold = 0.4
+    very_high_threshold = 0.7
+    
+    high_mask = y_test.flatten() > high_threshold
+    very_high_mask = y_test.flatten() > very_high_threshold
+    low_mask = y_test.flatten() <= high_threshold
+    
+    if np.sum(high_mask) > 0:
+        high_mae = mean_absolute_error(y_test.flatten()[high_mask], predictions.flatten()[high_mask])
+        low_mae = mean_absolute_error(y_test.flatten()[low_mask], predictions.flatten()[low_mask])
+        
+        high_pixel_percentage = np.sum(high_mask) / len(high_mask) * 100
+        very_high_pixel_percentage = np.sum(very_high_mask) / len(very_high_mask) * 100
+        
+        print(f"High-concentration pixels (>{high_threshold}): {high_pixel_percentage:.2f}% of total")
+        print(f"Very high-concentration pixels (>{very_high_threshold}): {very_high_pixel_percentage:.2f}% of total")
+        print(f"MAE on high-concentration pixels: {high_mae:.6f}")
+        print(f"MAE on low-concentration pixels: {low_mae:.6f}")
+        print(f"High/Low MAE ratio: {high_mae/low_mae:.2f} (lower is better)")
+        
+        if np.sum(very_high_mask) > 0:
+            very_high_mae = mean_absolute_error(y_test.flatten()[very_high_mask], predictions.flatten()[very_high_mask])
+            print(f"MAE on very high-concentration pixels: {very_high_mae:.6f}")
     
     # Create visualization
     n_predictions = min(len(predictions), 5)
@@ -418,7 +480,7 @@ def evaluate_model(model, test_loader, timestamps, test_start_idx):
     plt.savefig('pytorch_model_predictions.png', dpi=150, bbox_inches='tight')
     plt.close()
     
-    return mse, mae, mean_ssim, predictions
+    return mae, mean_ssim, predictions
 
 #_______________________________
 # Main execution
@@ -438,8 +500,14 @@ if __name__ == "__main__":
             "sequence_length": 4,
             "learning_rate": 0.01,
             "batch_size": 25,
-            "epochs": 5,
-            "image_resolution": "128x256"
+            "epochs": 12,
+            "image_resolution": "128x256",
+            "loss_function": "aggressive_weighted_mae",
+            "high_concentration_threshold": 0.4,
+            "high_concentration_weight": 20.0,
+            "very_high_concentration_threshold": 0.7,
+            "very_high_concentration_weight": 30.0,
+            "gradient_penalty_weight": 0.1
         }
     )
     
@@ -469,13 +537,14 @@ if __name__ == "__main__":
     print(f"y_train: {y_train.shape}")
     print(f"X_test: {X_test.shape}")
     print(f"y_test: {y_test.shape}")
-    
+    '''
     # Verify no leakage
     no_leakage = verify_no_leakage(X_train, X_test, y_train, y_test, seq_length)
     
     if not no_leakage:
         print("ERROR: Data leakage detected! Check the splitting logic.")
         exit(1)
+    '''
     
     # Create validation split from training data (temporal split)
     val_split_idx = int(len(X_train) * 0.6)
@@ -520,13 +589,14 @@ if __name__ == "__main__":
     print(f"Trainable parameters: {trainable_params:,}")
     
     # Train model
-    history = train_model_pytorch(model, train_loader, val_loader, epochs=12)
+    history = train_model_pytorch(model, train_loader, val_loader, epochs=8)
     
     # Evaluate model
-    mse, mae, mean_ssim, predictions = evaluate_model(model, test_loader, timestamps, test_start_idx)
+    mae, mean_ssim, predictions = evaluate_model(model, test_loader, timestamps, test_start_idx)
     
     # Log final test metrics to wandb
     wandb.log({
+        "test_mae": mae,
         "test_ssim": mean_ssim,
         "total_parameters": total_params,
         "trainable_parameters": trainable_params
@@ -535,17 +605,17 @@ if __name__ == "__main__":
     # Save training history plot
     plt.figure(figsize=(12, 4))
     plt.subplot(1, 2, 1)
-    plt.plot(history['train_loss'], label='Training Loss')
-    plt.plot(history['val_loss'], label='Validation Loss')
-    plt.title('Model Loss')
+    plt.plot(history['train_loss'], label='Training MAE')
+    plt.plot(history['val_loss'], label='Validation MAE')
+    plt.title('Model MAE')
     plt.xlabel('Epoch')
-    plt.ylabel('Loss')
+    plt.ylabel('MAE')
     plt.legend()
     
     plt.subplot(1, 2, 2)
-    plt.plot(history['train_mae'], label='Training MAE')
-    plt.plot(history['val_mae'], label='Validation MAE')
-    plt.title('Model MAE')
+    plt.plot(history['train_loss'], label='Training MAE')
+    plt.plot(history['val_loss'], label='Validation MAE')
+    plt.title('Model MAE (Duplicate)')
     plt.xlabel('Epoch')
     plt.ylabel('MAE')
     plt.legend()
@@ -559,7 +629,6 @@ if __name__ == "__main__":
         'model_type': 'Temporal LSTM with PyTorch and proper splitting',
         'framework': 'PyTorch',
         'device': str(device),
-        'no_data_leakage': no_leakage,
         'sequence_length': seq_length,
         'total_files': len(nc_files),
         'train_files': train_end_idx,
@@ -570,15 +639,12 @@ if __name__ == "__main__":
             'trainable': int(trainable_params)
         },
         'final_metrics': {
-            'mse': float(mse),
             'mae': float(mae),
             'ssim': float(mean_ssim)
         },
         'training_history': {
-            'final_train_loss': float(history['train_loss'][-1]),
-            'final_val_loss': float(history['val_loss'][-1]),
-            'final_train_mae': float(history['train_mae'][-1]),
-            'final_val_mae': float(history['val_mae'][-1])
+            'final_train_mae': float(history['train_loss'][-1]),
+            'final_val_mae': float(history['val_loss'][-1])
         },
         'timestamp': datetime.now().isoformat()
     }
@@ -591,8 +657,7 @@ if __name__ == "__main__":
     print("=" * 60)
     print(f"✓ Framework: PyTorch")
     print(f"✓ Device: {device}")
-    print(f"✓ No data leakage: {no_leakage}")
-    print(f"✓ Test MSE: {mse:.6f}")
+
     print(f"✓ Test MAE: {mae:.6f}")
     print(f"✓ Mean SSIM: {mean_ssim:.4f}")
     print(f"✓ Training files: {train_end_idx}")

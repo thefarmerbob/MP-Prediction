@@ -83,6 +83,11 @@ regions = {
         'color': '#FFC0CB',  # Pink
         'preprocess_func': 'global'
     },
+    'Japan': {
+        'filename': '../regional-averages/mp-japan-avg.txt',
+        'color': '#0000FF',  # Blue
+        'preprocess_func': 'regional'
+    },
     'Kyoto': {
         'filename': '../regional-averages/mp-kyoto-avg.txt',
         'color': '#00FFFF',  # Cyan

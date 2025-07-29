@@ -221,7 +221,7 @@ else:
 optimized_xgb_params = {
     'booster': 'gbtree',
     'objective': 'reg:squarederror',
-    'subsample': 0.58,  # Fixed
+    'subsample': 0.3,  # Fixed
     'colsample_bytree': 0.499,  # Fixed
     'min_child_weight': 14,  # Fixed
     'learning_rate': best_params.get('learning_rate', 0.03766600333324149),  # Optuna-optimized
@@ -278,13 +278,14 @@ print(f"Test data: {test_start_date} to {df.index[test_end_idx-1]}")
 # Set up plot start index for later use
 plot_start_idx = 0  # Show ALL historical data from the beginning
 
-# get splited data - train, test, and forecast (90 days)
-_, df_test, df = xgb_data_split(
-    df, bucket_size, df.index[-1].strftime('%Y-%m-%d %H:%M:%S'), 90, test_start_date, encode_cols)
+# get splited data - train, test, and forecast (30 days for about a month)
+df_forecast, df_test, df = xgb_data_split(
+    df, bucket_size, df.index[-1].strftime('%Y-%m-%d %H:%M:%S'), 30, test_start_date, encode_cols)
 print('\n-----XGBoost on datetime information with Optuna-Optimized Parameters for Kyoto-----\n')
 
 dim = {'train and validation data ': df.shape,
-       'test data ': df_test.shape}
+       'test data ': df_test.shape,
+       'forecast data ': df_forecast.shape}
 print(pd.DataFrame(list(dim.items()), columns=['Data', 'dimension']))
 
 # train model with optimized parameters
@@ -301,6 +302,9 @@ X_train, X_val, y_train, y_val = train_test_split(X, Y,
 X_test = xgb.DMatrix(df_test.iloc[:, 1:].astype(float))
 Y_test = df_test.iloc[:, 0]
 
+# Prepare forecast data
+X_forecast = xgb.DMatrix(df_forecast.astype(float))
+
 dtrain = xgb.DMatrix(X_train, y_train)
 dval = xgb.DMatrix(X_val, y_val)
 watchlist = [(dtrain, 'train'), (dval, 'validate')]
@@ -313,34 +317,50 @@ xgb_model = xgb.train(optimized_xgb_params, dtrain, ntree, evals=watchlist,
 Y_hat = xgb_model.predict(X_test)
 Y_hat = pd.DataFrame(Y_hat, index=Y_test.index, columns=["test_predicted"])
 
+# Make forecast predictions
+Y_forecast = xgb_model.predict(X_forecast)
+Y_forecast = pd.DataFrame(Y_forecast, index=df_forecast.index, columns=["forecast_predicted"])
+
 plot_start = df.index[plot_start_idx].strftime('%Y-%m-%d %H:%M:%S')
 print('-----XGBoost with Optuna-Optimized Parameters for Kyoto Microplastic Concentration------')
 print('---Testing with optimized model---')
 
-# Create simple plot without forecast data
+# Create comprehensive plot with forecast data
 Y_combined = pd.concat([Y, Y_test])
 ax = Y_combined[plot_start:].plot(label='observed', figsize=(15, 10), color='#00FFFF', alpha=0.5)
 Y_hat.plot(label="test_predicted", ax=ax, color='#008080', linewidth=2)
+Y_forecast.plot(label="forecast_predicted", ax=ax, color='#FF6B35', linewidth=2, linestyle='--')
 
 # Highlight test period
 ax.fill_betweenx(ax.get_ylim(), pd.to_datetime(Y_test.index[0]), Y_test.index[-1],
                  alpha=0.1, color='#008080', zorder=-1, label='Test Period')
 
+# Highlight forecast period
+ax.fill_betweenx(ax.get_ylim(), Y_forecast.index[0], Y_forecast.index[-1],
+                 alpha=0.1, color='#FF6B35', zorder=-1, label='Forecast Period (30 days)')
+
 ax.set_xlabel('Time')
 ax.set_ylabel('Microplastic Concentration')
-ax.set_title('Kyoto Optuna_Optimized_Model - Microplastic Concentration Prediction')
+ax.set_title('Kyoto Optuna_Optimized_Model - Microplastic Concentration Prediction with 30-Day Forecast')
 plt.legend()
 plt.grid(True, alpha=0.3)
 plt.tight_layout()
-plt.savefig('Kyoto_Optuna_Optimized_Model.png', dpi=300)
+plt.savefig('Kyoto_Optuna_Optimized_Model_with_Forecast.png', dpi=300)
 plt.close()
-print("Kyoto test prediction plot saved as: Kyoto_Optuna_Optimized_Model.png")
+print("Kyoto prediction plot with 30-day forecast saved as: Kyoto_Optuna_Optimized_Model_with_Forecast.png")
 
 # Calculate and display final model performance metrics
 test_rmse = np.sqrt(mean_squared_error(Y_test, Y_hat))
 print(f"\nFinal Kyoto Model Performance:")
 print(f"Test RMSE: {test_rmse:.6f}")
 print(f"Validation RMSE (from optimization): {best_rmse:.6f}")
+
+# Display forecast information
+print(f"\nForecast Information:")
+print(f"Forecast period: {Y_forecast.index[0].strftime('%Y-%m-%d')} to {Y_forecast.index[-1].strftime('%Y-%m-%d')}")
+print(f"Number of forecast days: {len(Y_forecast)}")
+print(f"Forecast value range: {Y_forecast.iloc[:, 0].min():.2f} to {Y_forecast.iloc[:, 0].max():.2f}")
+print(f"Average forecast value: {Y_forecast.iloc[:, 0].mean():.2f}")
 
 # Save the optimized parameters for future reference
 optimized_params_df = pd.DataFrame([best_params])

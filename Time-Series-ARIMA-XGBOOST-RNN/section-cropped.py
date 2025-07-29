@@ -87,6 +87,10 @@ def process_and_plot(nc_file):
         data_cropped_flipped = np.flipud(data_cropped)
         
         # Define the regions of interest with coordinates
+        # Japan region (broader)
+        # SW: 25.35753, 118.85766
+        # NE: 36.98134, 145.47117
+        
         # Tsushima region
         # SW: 34.02837, 129.11613
         # NE: 34.76456, 129.55801
@@ -102,6 +106,19 @@ def process_and_plot(nc_file):
         # Osaka region
         # SW: 32.88645, 134.44579
         # NE: 33.17125, 135.09421
+        
+        # Convert Japan coordinates to grid indices (using full dataset)
+        japan_sw_lat, japan_sw_lon = 25.35753, 118.85766
+        japan_ne_lat, japan_ne_lon = 36.98134, 145.47117
+        
+        japan_sw_lat_idx, japan_sw_lon_idx = lat_lon_to_indices(japan_sw_lat, japan_sw_lon, lats, lons)
+        japan_ne_lat_idx, japan_ne_lon_idx = lat_lon_to_indices(japan_ne_lat, japan_ne_lon, lats, lons)
+        
+        # Ensure proper ordering for Japan analysis
+        japan_lat_start = min(japan_sw_lat_idx, japan_ne_lat_idx)
+        japan_lat_end = max(japan_sw_lat_idx, japan_ne_lat_idx)
+        japan_lon_start = min(japan_sw_lon_idx, japan_ne_lon_idx)
+        japan_lon_end = max(japan_sw_lon_idx, japan_ne_lon_idx)
         
         # Convert Tsushima coordinates to grid indices (using full dataset)
         tsushima_sw_lat, tsushima_sw_lon = 34.02837, 129.11613
@@ -156,15 +173,18 @@ def process_and_plot(nc_file):
         osaka_lon_end = max(osaka_sw_lon_idx, osaka_ne_lon_idx)
         
         # Extract the regions of interest from the FULL data for analysis
+        japan_region_data = data_array_2d[japan_lat_start:japan_lat_end, japan_lon_start:japan_lon_end]
         tsushima_region_data = data_array_2d[tsushima_lat_start:tsushima_lat_end, tsushima_lon_start:tsushima_lon_end]
         tokyo_region_data = data_array_2d[tokyo_lat_start:tokyo_lat_end, tokyo_lon_start:tokyo_lon_end]
         kyoto_region_data = data_array_2d[kyoto_lat_start:kyoto_lat_end, kyoto_lon_start:kyoto_lon_end]
         osaka_region_data = data_array_2d[osaka_lat_start:osaka_lat_end, osaka_lon_start:osaka_lon_end]
         
+        japan_average_concentration = np.nanmean(japan_region_data)
         tsushima_average_concentration = np.nanmean(tsushima_region_data)
         tokyo_average_concentration = np.nanmean(tokyo_region_data)
         kyoto_average_concentration = np.nanmean(kyoto_region_data)
         osaka_average_concentration = np.nanmean(osaka_region_data)
+        print(f"File: {nc_file}, Japan average microplastic concentration: {japan_average_concentration:.2f}")
         print(f"File: {nc_file}, Tsushima average microplastic concentration: {tsushima_average_concentration:.2f}")
         print(f"File: {nc_file}, Tokyo average microplastic concentration: {tokyo_average_concentration:.2f}")
         print(f"File: {nc_file}, Kyoto average microplastic concentration: {kyoto_average_concentration:.2f}")
@@ -185,6 +205,15 @@ def process_and_plot(nc_file):
         img = ax.imshow(data_cropped_flipped, aspect='auto', cmap='viridis', extent=display_extent)
         ax.set_xlabel("Longitude (°)")
         ax.set_ylabel("Latitude (°)")
+        
+        # Draw the Japan region box (blue box) - only if it's within the display region
+        if (japan_sw_lon >= display_extent[0] and japan_ne_lon <= display_extent[1] and
+            japan_sw_lat >= display_extent[2] and japan_ne_lat <= display_extent[3]):
+            japan_rect = plt.Rectangle((japan_sw_lon, japan_sw_lat), 
+                                     japan_ne_lon - japan_sw_lon, japan_ne_lat - japan_sw_lat,
+                                     linewidth=3, edgecolor='blue', facecolor='none', 
+                                     label='Japan Region')
+            ax.add_patch(japan_rect)
         
         # Draw the Tsushima region box (red box) - only if it's within the display region
         if (tsushima_sw_lon >= display_extent[0] and tsushima_ne_lon <= display_extent[1] and
@@ -287,7 +316,7 @@ def process_and_plot(nc_file):
     ax.set_title(f"Microplastic Concentration Map - {date_title}\n(East Asia Region)", fontsize=14, pad=20)
 
     # Add text to the plot with concentration statistics
-    textstr = f"Global Avg: {global_average_concentration:.2f}\nTsushima: {tsushima_average_concentration:.2f}\nTokyo: {tokyo_average_concentration:.2f}\nKyoto: {kyoto_average_concentration:.2f}\nOsaka: {osaka_average_concentration:.2f}\nDisplay: SW(22.31°,118.08°) NE(36.96°,143.95°)"
+    textstr = f"Global Avg: {global_average_concentration:.2f}\nJapan: {japan_average_concentration:.2f}\nTsushima: {tsushima_average_concentration:.2f}\nTokyo: {tokyo_average_concentration:.2f}\nKyoto: {kyoto_average_concentration:.2f}\nOsaka: {osaka_average_concentration:.2f}\nDisplay: SW(22.31°,118.08°) NE(36.96°,143.95°)"
     props = dict(boxstyle='round', facecolor='wheat', alpha=0.8)
     ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=9, 
             verticalalignment='top', bbox=props)

@@ -9,5 +9,7 @@
 			"path": "../../Downloads/CYGNSS-data"
 		}
 	],
-	"settings": {}
+	"settings": {
+		"liveServer.settings.multiRootWorkspaceName": "MP-Prediction"
+	}
 }
