@@ -1,3 +1,8 @@
+import os
+# MUST be set BEFORE any other imports to suppress macOS warnings
+os.environ['MallocStackLogging'] = '0'
+os.environ['MALLOC_STACK_LOGGING'] = '0'
+
 import sys
 print(sys.executable)
 
@@ -19,6 +24,10 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error
 from skimage.metrics import structural_similarity as ssim
 import json
 import wandb
+import pandas as pd
+
+# Optionally disable wandb to avoid macOS warnings (uncomment to disable)
+# os.environ['WANDB_MODE'] = 'disabled'
 
 # Import the SA-ConvLSTM model
 from sa_convlstm import SA_ConvLSTM_Model
@@ -37,7 +46,7 @@ print(f"Last file: {nc_files[-1].name if nc_files else 'No files found'}")
 class Args:
     """Configuration class for SA-ConvLSTM model"""
     def __init__(self):
-        self.batch_size = 16  # Reduced further for debugging
+        self.batch_size = 8  # Reduced further for debugging
         self.gpu_num = 1
         self.img_size = 64  # Reduced from 128 for faster debugging
         self.num_layers = 1  # Reduced from 2 for debugging
@@ -45,7 +54,7 @@ class Args:
         self.input_dim = 1  # single channel for microplastics concentration
         self.hidden_dim = 32  # Reduced from 64 for debugging
         self.learning_rate = 0.001
-        self.epochs = 10  # Reduced for debugging
+        self.epochs = 3  # Reduced for debugging
         self.patch_size = 4  # Reduced patch size for smaller images
 
 def extract_timestamps_from_filenames(nc_files):
@@ -347,8 +356,8 @@ def train_sa_convlstm(model, train_loader, val_loader, args):
             train_loss += loss.item()
             train_batches += 1
             
-            # Log batch-level metrics to wandb
-            if batch_idx % 10 == 0:  # Log every 10th batch
+            # Log batch-level metrics to wandb (reduced frequency to minimize warnings)
+            if batch_idx % 20 == 0:  # Log every 20th batch (reduced from 10)
                 wandb.log({
                     'batch_train_loss': loss.item(),
                     'epoch': epoch + 1,
@@ -536,6 +545,160 @@ def evaluate_sa_convlstm(model, test_loader, timestamps, test_start_idx):
     plt.close()
     
     return mae, mean_ssim, predictions
+
+def forecast_future(model, data, timestamps, args, num_forecast_days=5):
+    """
+    Forecast future microplastics concentrations using the trained model.
+    Uses the last sequence from the data to predict future days.
+    """
+    print(f"\n=== FORECASTING {num_forecast_days} DAYS INTO THE FUTURE ===")
+    
+    model.eval()
+    forecasts = []
+    
+    # Start with the last sequence from the data
+    last_sequence = data[-args.frame_num:]  # Shape: (frame_num, height, width)
+    current_sequence = torch.FloatTensor(last_sequence).unsqueeze(0)  # Add batch dim
+    current_sequence = torch.unsqueeze(current_sequence, 2)  # Add channel dim: (1, frame_num, 1, height, width)
+    current_sequence = current_sequence.to(device)
+    
+    # Get the last date from the data
+    last_date = timestamps[-1]
+    forecast_dates = []
+    
+    print(f"Starting forecast from: {last_date.strftime('%Y-%m-%d')}")
+    
+    with torch.no_grad():
+        for day in range(num_forecast_days):
+            # Predict next day
+            prediction = model(current_sequence)  # (1, frame_num, 1, height, width)
+            next_day_pred = prediction[:, -1, :, :, :]  # Take last prediction: (1, 1, height, width)
+            
+            # Store the forecast
+            forecast_img = next_day_pred.squeeze().cpu().numpy()  # (height, width)
+            forecasts.append(forecast_img)
+            
+            # Calculate next date
+            next_date = last_date + pd.Timedelta(days=day+1)
+            forecast_dates.append(next_date)
+            print(f"  Forecasted day {day+1}: {next_date.strftime('%Y-%m-%d')}")
+            
+            # Update sequence for next prediction (sliding window)
+            # Remove first frame and add the new prediction
+            new_sequence = current_sequence[:, 1:, :, :, :].clone()  # Remove first frame
+            next_day_pred_expanded = next_day_pred.unsqueeze(1)  # Add time dimension
+            current_sequence = torch.cat([new_sequence, next_day_pred_expanded], dim=1)
+    
+    forecasts = np.array(forecasts)
+    print(f"Generated forecasts shape: {forecasts.shape}")
+    
+    # Create forecast visualization
+    fig, axes = plt.subplots(1, num_forecast_days, figsize=(20, 4))
+    fig.suptitle('SA-ConvLSTM 5-Day Microplastics Forecast\n(Japan Region Future Predictions)', fontsize=16)
+    
+    if num_forecast_days == 1:
+        axes = [axes]  # Make it iterable for single subplot
+    
+    for i in range(num_forecast_days):
+        # Flip vertically for correct geographic orientation
+        forecast_flipped = np.flipud(forecasts[i])
+        im = axes[i].imshow(forecast_flipped, cmap='viridis', aspect='auto')
+        axes[i].set_title(f'Day +{i+1}\n{forecast_dates[i].strftime("%Y-%m-%d")}')
+        axes[i].axis('off')
+        
+        # Add colorbar to each subplot
+        plt.colorbar(im, ax=axes[i], fraction=0.046, pad=0.04)
+    
+    plt.tight_layout()
+    plt.savefig('sa_convlstm_forecast.png', dpi=150, bbox_inches='tight')
+    
+    # Log forecast visualization to wandb
+    wandb.log({"forecast_visualization": wandb.Image('sa_convlstm_forecast.png')})
+    
+    # Create individual forecast images for wandb
+    forecast_images = []
+    for i in range(num_forecast_days):
+        fig, ax = plt.subplots(1, 1, figsize=(8, 6))
+        
+        forecast_flipped = np.flipud(forecasts[i])
+        im = ax.imshow(forecast_flipped, cmap='viridis', aspect='auto')
+        ax.set_title(f'Microplastics Forecast\nDay +{i+1}: {forecast_dates[i].strftime("%Y-%m-%d")}')
+        ax.axis('off')
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        
+        plt.tight_layout()
+        forecast_path = f'forecast_day_{i+1}.png'
+        plt.savefig(forecast_path, dpi=150, bbox_inches='tight')
+        forecast_images.append(wandb.Image(forecast_path))
+        plt.close()
+    
+    # Log individual forecasts to wandb
+    wandb.log({"individual_forecasts": forecast_images})
+    
+    # Log forecast statistics
+    forecast_stats = {
+        "forecast_days": num_forecast_days,
+        "forecast_start_date": last_date.strftime('%Y-%m-%d'),
+        "forecast_end_date": forecast_dates[-1].strftime('%Y-%m-%d'),
+        "forecast_mean_concentration": np.mean(forecasts),
+        "forecast_std_concentration": np.std(forecasts),
+        "forecast_min_concentration": np.min(forecasts),
+        "forecast_max_concentration": np.max(forecasts)
+    }
+    
+    wandb.log(forecast_stats)
+    
+    print(f"\nForecast Statistics:")
+    print(f"  Period: {last_date.strftime('%Y-%m-%d')} to {forecast_dates[-1].strftime('%Y-%m-%d')}")
+    print(f"  Mean concentration: {np.mean(forecasts):.6f}")
+    print(f"  Std concentration: {np.std(forecasts):.6f}")
+    print(f"  Range: {np.min(forecasts):.6f} to {np.max(forecasts):.6f}")
+    
+    return forecasts, forecast_dates
+
+def retrain_on_full_dataset(args, data, timestamps):
+    """
+    Retrain the model on the FULL dataset for forecasting.
+    """
+    print(f"\n=== RETRAINING ON FULL DATASET FOR FORECASTING ===")
+    
+    # Create sequences from the FULL dataset
+    X_full, y_full = create_sequences_from_data(data, args.frame_num)
+    
+    print(f"Full dataset shapes:")
+    print(f"X_full: {X_full.shape}")
+    print(f"y_full: {y_full.shape}")
+    
+    # Create validation split (use last 20% as validation to avoid future leakage)
+    val_split_idx = int(len(X_full) * 0.8)
+    X_train_full = X_full[:val_split_idx]
+    y_train_full = y_full[:val_split_idx]
+    X_val_full = X_full[val_split_idx:]
+    y_val_full = y_full[val_split_idx:]
+    
+    print(f"Full training: {X_train_full.shape}")
+    print(f"Full validation: {X_val_full.shape}")
+    
+    # Convert to PyTorch tensors
+    X_train_tensor = torch.FloatTensor(X_train_full)
+    y_train_tensor = torch.FloatTensor(y_train_full)
+    X_val_tensor = torch.FloatTensor(X_val_full)
+    y_val_tensor = torch.FloatTensor(y_val_full)
+    
+    # Create data loaders
+    train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
+    val_dataset = TensorDataset(X_val_tensor, y_val_tensor)
+    
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
+    
+    # Create a new model for full training
+    forecast_model = SA_ConvLSTM_Model(args)
+    
+    # Train on full dataset
+    history = train_sa_convlstm(forecast_model, train_loader, val_loader, args)
+    
+    return forecast_model
 
 #_______________________________
 # Main execution
@@ -772,6 +935,55 @@ if __name__ == "__main__":
     print("- sa_convlstm_training.png") 
     print("- sa_convlstm_results.json")
     print("- sa_convlstm_japan_microplastics.pth")
+    print("=" * 60)
+    
+    # FORECASTING: Retrain on full dataset and predict future
+    print("\n" + "=" * 60)
+    print("STARTING FORECASTING PHASE")
+    print("=" * 60)
+    
+    # Retrain model on the FULL dataset for forecasting
+    forecast_model = retrain_on_full_dataset(args, data, timestamps)
+    
+    # Generate 5-day forecast
+    forecasts, forecast_dates = forecast_future(forecast_model, data, timestamps, args, num_forecast_days=5)
+    
+    # Save forecast model
+    torch.save(forecast_model.state_dict(), 'sa_convlstm_forecast_model.pth')
+    
+    # Save forecast results
+    forecast_results = {
+        'forecast_type': 'SA-ConvLSTM 5-Day Future Prediction',
+        'model_trained_on': 'Full Dataset',
+        'forecast_start_date': timestamps[-1].strftime('%Y-%m-%d'),
+        'forecast_dates': [date.strftime('%Y-%m-%d') for date in forecast_dates],
+        'forecast_days': len(forecasts),
+        'forecast_statistics': {
+            'mean_concentration': float(np.mean(forecasts)),
+            'std_concentration': float(np.std(forecasts)),
+            'min_concentration': float(np.min(forecasts)),
+            'max_concentration': float(np.max(forecasts))
+        },
+        'geographic_region': {
+            'name': 'Japan',
+            'description': 'Future microplastics predictions for Japan region'
+        }
+    }
+    
+    with open('sa_convlstm_forecast_results.json', 'w') as f:
+        json.dump(forecast_results, f, indent=2)
+    
+    print("\n" + "=" * 60)
+    print("FORECASTING COMPLETED")
+    print("=" * 60)
+    print(f"✓ Generated 5-day forecast from {timestamps[-1].strftime('%Y-%m-%d')}")
+    print(f"✓ Forecast period: {forecast_dates[0].strftime('%Y-%m-%d')} to {forecast_dates[-1].strftime('%Y-%m-%d')}")
+    print(f"✓ Mean predicted concentration: {np.mean(forecasts):.6f}")
+    print("\nForecast files generated:")
+    print("- sa_convlstm_forecast.png")
+    print("- forecast_day_1.png to forecast_day_5.png")
+    print("- sa_convlstm_forecast_results.json")
+    print("- sa_convlstm_forecast_model.pth")
     print("=" * 60)
     
     # Finish wandb run
