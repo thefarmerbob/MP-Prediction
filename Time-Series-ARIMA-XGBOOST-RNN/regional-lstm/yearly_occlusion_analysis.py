@@ -129,15 +129,33 @@ def create_gif_from_images(image_dir, output_filename='yearly_occlusion_analysis
     
     print(f"Creating GIF from {len(image_files)} images...")
     
-    # Read all images
+    # Read all images and resize to common dimensions
     images = []
-    for img_file in image_files:
-        img = imageio.imread(img_file)
+    target_size = None
+    
+    for i, img_file in enumerate(image_files):
+        img = imageio.v2.imread(img_file)  # Use v2 to avoid deprecation warning
+        
+        # Set target size from first image
+        if target_size is None:
+            target_size = img.shape[:2]  # (height, width)
+            print(f"Target image size: {target_size}")
+        
+        # Resize if needed
+        if img.shape[:2] != target_size:
+            # Resize using PIL for better quality
+            img_pil = Image.fromarray(img)
+            img_pil = img_pil.resize((target_size[1], target_size[0]), Image.Resampling.LANCZOS)
+            img = np.array(img_pil)
+        
         images.append(img)
+        
+        if i % 50 == 0:
+            print(f"  Processed {i+1}/{len(image_files)} images...")
     
     # Create GIF
     output_path = Path(output_filename)
-    imageio.mimsave(output_path, images, duration=duration, loop=0)
+    imageio.v2.mimsave(output_path, images, duration=duration, loop=0)
     
     print(f"GIF saved as: {output_path}")
     return output_path
